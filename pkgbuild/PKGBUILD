@@ -1,0 +1,32 @@
+# Built locally by bin/package, which packs the working tree into the
+# source tarball named below.
+pkgname=omacalc
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="Dead-simple calculator built with Qt Quick"
+arch=('x86_64')
+url="https://github.com/omacom-io/omacalc"
+license=('MIT' 'OFL-1.1')
+depends=('hicolor-icon-theme' 'qt6-base' 'qt6-declarative' 'xdg-desktop-portal')
+install=omacalc.install
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  ./bin/build
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  ./bin/test
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 build/omacalc "$pkgdir/usr/bin/omacalc"
+  install -Dm644 pkgbuild/omacalc.desktop "$pkgdir/usr/share/applications/omacalc.desktop"
+  install -Dm644 pkgbuild/omacalc.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/omacalc.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 fonts/OFL.txt "$pkgdir/usr/share/licenses/$pkgname/OFL.txt"
+}

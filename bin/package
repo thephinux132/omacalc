@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+set -eu
+
+# Build an Arch package from the working tree, uncommitted changes included,
+# and leave it in dist/. Install it with: sudo pacman -U dist/omacalc-*.pkg.tar.zst
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+PKG_DIR="$ROOT/build-package"
+DIST_DIR="$ROOT/dist"
+VERSION="$(sed -n 's/^pkgver=//p' "$ROOT/pkgbuild/PKGBUILD")"
+
+rm -rf "$PKG_DIR"
+mkdir -p "$PKG_DIR" "$DIST_DIR"
+
+# A stash commit snapshots tracked files as they are now; with a clean tree
+# there is nothing to stash and HEAD is the snapshot.
+SNAPSHOT="$(git -C "$ROOT" stash create)"
+git -C "$ROOT" archive --format=tar.gz --prefix="omacalc-$VERSION/" \
+  -o "$PKG_DIR/omacalc-$VERSION.tar.gz" "${SNAPSHOT:-HEAD}"
+
+cp "$ROOT/pkgbuild/PKGBUILD" "$ROOT/pkgbuild/omacalc.install" "$PKG_DIR/"
+cd "$PKG_DIR"
+PKGDEST="$DIST_DIR" makepkg --force --cleanbuild
+
+echo "Package written to $DIST_DIR"
