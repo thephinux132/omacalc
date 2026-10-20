@@ -261,6 +261,244 @@ private slots:
         QVERIFY(!ok);
     }
 
+    void groupsWithParentheses() {
+        Backend calculator;
+        press(calculator, "( 2 + 3 ) × 4 =");
+        QCOMPARE(calculator.display(), QStringLiteral("20"));
+        QCOMPARE(calculator.expression(), QStringLiteral("(2 + 3) × 4"));
+
+        // Open groups close themselves on equals.
+        press(calculator, "clear 2 × ( 3 + 4 =");
+        QCOMPARE(calculator.display(), QStringLiteral("14"));
+        QCOMPARE(calculator.expression(), QStringLiteral("2 × (3 + 4)"));
+
+        press(calculator, "clear ( ( 1 + 2 ) × ( 3 + 4 ) ) ^ 2 =");
+        QCOMPARE(calculator.display(), QStringLiteral("441"));
+
+        // A closing parenthesis with nothing open is ignored.
+        press(calculator, "clear 5 ) + 1 =");
+        QCOMPARE(calculator.display(), QStringLiteral("6"));
+
+        // Dangling operators and empty groups drop away.
+        press(calculator, "clear 7 × ( =");
+        QCOMPARE(calculator.display(), QStringLiteral("7"));
+    }
+
+    void multipliesImplicitly() {
+        Backend calculator;
+        press(calculator, "2 ( 3 ) =");
+        QCOMPARE(calculator.display(), QStringLiteral("6"));
+        QCOMPARE(calculator.expression(), QStringLiteral("2 × (3)"));
+
+        press(calculator, "clear ( 1 + 1 ) 5 =");
+        QCOMPARE(calculator.display(), QStringLiteral("10"));
+
+        press(calculator, "clear 2 π =");
+        QCOMPARE(calculator.display(), Backend::formatNumber(2 * M_PI));
+    }
+
+    void negatesGroups() {
+        Backend calculator;
+        press(calculator, "( - 3 ) × 2 =");
+        QCOMPARE(calculator.display(), QStringLiteral("-6"));
+        QCOMPARE(calculator.expression(), QStringLiteral("(−3) × 2"));
+
+        // Unary minus binds looser than the power it negates.
+        press(calculator, "clear ( - 2 ^ 2 ) =");
+        QCOMPARE(calculator.display(), QStringLiteral("-4"));
+
+        // Only negation may follow an opening parenthesis.
+        press(calculator, "clear ( × 4 ) =");
+        QCOMPARE(calculator.display(), QStringLiteral("4"));
+    }
+
+    void calculatesFunctions() {
+        Backend calculator;
+        calculator.setDegrees(true);
+
+        press(calculator, "sqrt 1 6 =");
+        QCOMPARE(calculator.display(), QStringLiteral("4"));
+        QCOMPARE(calculator.expression(), QStringLiteral("√(16)"));
+
+        press(calculator, "clear sin 3 0 =");
+        QCOMPARE(calculator.display(), QStringLiteral("0.5"));
+        press(calculator, "clear sin 1 8 0 =");
+        QCOMPARE(calculator.display(), QStringLiteral("0"));
+        press(calculator, "clear cos 9 0 =");
+        QCOMPARE(calculator.display(), QStringLiteral("0"));
+        press(calculator, "clear tan 4 5 =");
+        QCOMPARE(calculator.display(), QStringLiteral("1"));
+        press(calculator, "clear tan 9 0 =");
+        QCOMPARE(calculator.display(), QStringLiteral("Error"));
+        press(calculator, "clear sin sign 2 7 0 =");
+        QCOMPARE(calculator.display(), QStringLiteral("1"));
+
+        press(calculator, "clear log 1 0 0 0 =");
+        QCOMPARE(calculator.display(), QStringLiteral("3"));
+        press(calculator, "clear ln e =");
+        QCOMPARE(calculator.display(), QStringLiteral("1"));
+        press(calculator, "clear ln 0 =");
+        QCOMPARE(calculator.display(), QStringLiteral("Error"));
+        press(calculator, "clear sqrt sign 4 =");
+        QCOMPARE(calculator.display(), QStringLiteral("Error"));
+
+        // Functions take whole expressions and sit inside larger ones.
+        press(calculator, "clear sqrt 9 ) + sqrt 1 6 ) =");
+        QCOMPARE(calculator.display(), QStringLiteral("7"));
+        press(calculator, "clear sqrt 9 + 1 6 =");
+        QCOMPARE(calculator.display(), QStringLiteral("5"));
+        press(calculator, "clear 2 sqrt 9 =");
+        QCOMPARE(calculator.display(), QStringLiteral("6"));
+    }
+
+    void switchesAngleUnits() {
+        Backend calculator;
+        calculator.setDegrees(false);
+        QVERIFY(!calculator.degrees());
+
+        press(calculator, "sin π =");
+        QCOMPARE(calculator.display(), QStringLiteral("0"));
+        press(calculator, "clear cos π =");
+        QCOMPARE(calculator.display(), QStringLiteral("-1"));
+        press(calculator, "clear sin π ÷ 2 =");
+        QCOMPARE(calculator.display(), QStringLiteral("1"));
+
+        // The unit is remembered between launches.
+        Backend relaunched;
+        QVERIFY(!relaunched.degrees());
+        calculator.setDegrees(true);
+        Backend restored;
+        QVERIFY(restored.degrees());
+    }
+
+    void calculatesFactorials() {
+        Backend calculator;
+        press(calculator, "5 ! =");
+        QCOMPARE(calculator.display(), QStringLiteral("120"));
+        QCOMPARE(calculator.expression(), QStringLiteral("5!"));
+
+        press(calculator, "clear 3 ! + 1 =");
+        QCOMPARE(calculator.display(), QStringLiteral("7"));
+        press(calculator, "clear ( 1 + 2 ) ! =");
+        QCOMPARE(calculator.display(), QStringLiteral("6"));
+        press(calculator, "clear 0 ! =");
+        QCOMPARE(calculator.display(), QStringLiteral("1"));
+        press(calculator, "clear 2 . 5 ! =");
+        QCOMPARE(calculator.display(), QStringLiteral("Error"));
+        press(calculator, "clear 1 7 1 ! =");
+        QCOMPARE(calculator.display(), QStringLiteral("Error"));
+
+        // Factorial needs something to apply to.
+        press(calculator, "clear 2 + ! 3 =");
+        QCOMPARE(calculator.display(), QStringLiteral("5"));
+    }
+
+    void previewsTheResult() {
+        Backend calculator;
+        press(calculator, "4 2");
+        QCOMPARE(calculator.preview(), QString());
+
+        press(calculator, "× 3 + 7");
+        QCOMPARE(calculator.preview(), QStringLiteral("133"));
+
+        // The preview closes open groups and skips a dangling operator.
+        press(calculator, "clear 2 × ( 3 + 4 ×");
+        QCOMPARE(calculator.preview(), QStringLiteral("14"));
+
+        // Nothing to preview once evaluated or after an error.
+        press(calculator, "=");
+        QCOMPARE(calculator.preview(), QString());
+        press(calculator, "clear 1 ÷ 0");
+        QCOMPARE(calculator.preview(), QString());
+    }
+
+    void showsClosedGroupOnDisplay() {
+        Backend calculator;
+        press(calculator, "( 2 + 3 )");
+        QCOMPARE(calculator.display(), QStringLiteral("5"));
+        press(calculator, "×");
+        QCOMPARE(calculator.display(), QStringLiteral("5"));
+    }
+
+    void backspaceStepsThroughExpression() {
+        Backend calculator;
+        press(calculator, "sin 3 0 ) backspace");
+        QCOMPARE(calculator.expression(), QStringLiteral("sin("));
+        QCOMPARE(calculator.display(), QStringLiteral("30"));
+
+        press(calculator, "backspace backspace backspace");
+        QCOMPARE(calculator.expression(), QString());
+        QCOMPARE(calculator.display(), QStringLiteral("0"));
+
+        // Backspace past an operator reopens the number before it.
+        press(calculator, "1 2 + backspace 3 =");
+        QCOMPARE(calculator.display(), QStringLiteral("123"));
+    }
+
+    void percentInsideGroups() {
+        Backend calculator;
+        press(calculator, "( 2 0 0 + 1 0 % ) × 2 =");
+        QCOMPARE(calculator.display(), QStringLiteral("440"));
+
+        press(calculator, "clear 5 + ( 2 0 0 - 5 0 % =");
+        QCOMPARE(calculator.display(), QStringLiteral("105"));
+    }
+
+    void keepsHistory() {
+        Backend calculator;
+        calculator.clearHistory();
+        QVERIFY(calculator.history().isEmpty());
+
+        press(calculator, "6 × 7 =");
+        press(calculator, "clear 1 ÷ 3 =");
+        // A bare number and an error are not worth remembering.
+        press(calculator, "clear 5 =");
+        press(calculator, "clear 1 ÷ 0 =");
+
+        QCOMPARE(calculator.history().size(), 2);
+        const QVariantMap latest = calculator.history().first().toMap();
+        QCOMPARE(latest.value("expression").toString(), QStringLiteral("1 ÷ 3"));
+        QCOMPARE(latest.value("result").toString(), QStringLiteral("0.333333333333333"));
+
+        // Recalling keeps full precision.
+        press(calculator, "clear");
+        calculator.recallHistory(0);
+        press(calculator, "× 3 =");
+        QCOMPARE(calculator.display(), QStringLiteral("1"));
+
+        // Recalling after an operand multiplies it.
+        press(calculator, "clear 2");
+        calculator.recallHistory(2);
+        press(calculator, "=");
+        QCOMPARE(calculator.display(), QStringLiteral("84"));
+
+        // Each recalled calculation is remembered too.
+        // History survives a relaunch, and clears for good.
+        Backend relaunched;
+        QCOMPARE(relaunched.history().size(), 4);
+        relaunched.clearHistory();
+        Backend cleared;
+        QVERIFY(cleared.history().isEmpty());
+    }
+
+    void evaluatesStructuredTokens() {
+        bool ok = false;
+        QCOMPARE(Backend::evaluateTokens({"(", "2", "+", "3", ")", "×", "4"}, &ok), 20.0);
+        QVERIFY(ok);
+
+        QCOMPARE(Backend::evaluateTokens({"−", "2", "^", "2"}, &ok), -4.0);
+        QVERIFY(ok);
+
+        QCOMPARE(Backend::evaluateTokens({"1", "÷", "(", "1", "÷", "0", ")"}, &ok), 0.0);
+        QVERIFY(!ok);
+
+        Backend::evaluateTokens({"(", "2"}, &ok);
+        QVERIFY(!ok);
+
+        Backend::evaluateTokens({"2", ")"}, &ok);
+        QVERIFY(!ok);
+    }
+
     void opensAtTheDesignSizeForTheTextScale() {
         Backend calculator;
         calculator.setTextScale(1);

@@ -10,6 +10,7 @@
 #include <QTextStream>
 #include <QVariantMap>
 #include <cmath>
+#include <limits>
 
 namespace {
 const QString plusSign = QStringLiteral("+");
@@ -47,6 +48,61 @@ bool isOperator(const QString &token) {
         || token == powerSign;
 }
 
+// Each function token carries its own opening parenthesis, so "sin(" reads
+// back exactly as it was entered and closes like any other group.
+const QStringList functionTokens = {
+    QStringLiteral("sin("), QStringLiteral("cos("), QStringLiteral("tan("),
+    QStringLiteral("ln("), QStringLiteral("log("), QStringLiteral("√("),
+};
+const QString openParen = QStringLiteral("(");
+const QString closeParen = QStringLiteral(")");
+const QString factorialSign = QStringLiteral("!");
+const QString piSign = QStringLiteral("π");
+const QString eulerSign = QStringLiteral("e");
+
+bool isOpener(const QString &token) {
+    return token == openParen || functionTokens.contains(token);
+}
+
+bool isConstant(const QString &token) {
+    return token == piSign || token == eulerSign;
+}
+
+// A token that can stand at the end of a complete operand: a number, a
+// constant, a closed group, or a factorial.
+bool endsOperand(const QString &token) {
+    return !isOperator(token) && !isOpener(token);
+}
+
+int unclosedGroups(const QStringList &tokens) {
+    int depth = 0;
+    for (const QString &token : tokens) {
+        if (isOpener(token))
+            ++depth;
+        else if (token == closeParen && depth > 0)
+            --depth;
+    }
+    return depth;
+}
+
+// The index where the operand ending at `end` begins, so a closed group is
+// taken whole along with the function that opened it.
+int operandStart(const QStringList &tokens, int end) {
+    const QString &token = tokens.at(end);
+    if (token == factorialSign && end > 0)
+        return operandStart(tokens, end - 1);
+    if (token != closeParen)
+        return end;
+    int depth = 0;
+    for (int i = end; i >= 0; --i) {
+        if (tokens.at(i) == closeParen)
+            ++depth;
+        else if (isOpener(tokens.at(i)) && --depth == 0)
+            return i;
+    }
+    return 0;
+}
+
 // Digits are entered raw, so "5." and "-" can linger while typing. Seal them
 // into plain numbers before they join the expression.
 QString sealNumber(const QString &entry) {
@@ -57,6 +113,176 @@ QString sealNumber(const QString &entry) {
         return QStringLiteral("0");
     return sealed;
 }
+
+// Binary floating point leaves sin(π) at 1.2e-16 rather than 0. A result that
+// small next to an argument of at least 1 is rounding noise, not an answer.
+double snapTrigNoise(double argument, double result) {
+    if (std::fabs(argument) >= 1.0
+            && std::fabs(result) < 4 * std::numeric_limits<double>::epsilon() * std::fabs(argument))
+        return 0;
+    return result;
+}
+
+// Recursive descent over the token list, lowest precedence first:
+//   expression := term (("+" | "−") term)*
+//   term       := unary (("×" | "÷") unary)*
+//   unary      := ("−" | "+") unary | power
+//   power      := postfix ("^" unary)?          right-associative
+//   postfix    := primary "!"*
+//   primary    := number | constant | opener expression ")"
+// Signed number tokens like "-2" are literals, so "-2 ^ 2" squares the
+// negative number while "−(2) ^ 2" negates the square.
+class Parser {
+public:
+    Parser(const QStringList &tokens, bool degrees) : m_tokens(tokens), m_degrees(degrees) {}
+
+    double parse(bool *ok) {
+        const double value = expression();
+        *ok = m_ok && m_position == m_tokens.size() && std::isfinite(value);
+        return *ok ? value : 0;
+    }
+
+private:
+    const QString &peek() const {
+        static const QString end;
+        return m_position < m_tokens.size() ? m_tokens.at(m_position) : end;
+    }
+
+    double fail() {
+        m_ok = false;
+        return 0;
+    }
+
+    double checked(double value) {
+        return std::isfinite(value) ? value : fail();
+    }
+
+    double expression() {
+        double value = term();
+        while (m_ok && (peek() == plusSign || peek() == minusSign)) {
+            const bool adding = m_tokens.at(m_position++) == plusSign;
+            const double right = term();
+            value = checked(adding ? value + right : value - right);
+        }
+        return value;
+    }
+
+    double term() {
+        double value = unary();
+        while (m_ok && (peek() == multiplySign || peek() == divideSign)) {
+            const bool multiplying = m_tokens.at(m_position++) == multiplySign;
+            const double right = unary();
+            value = checked(multiplying ? value * right : value / right);
+        }
+        return value;
+    }
+
+    double unary() {
+        if (peek() == minusSign) {
+            ++m_position;
+            return -unary();
+        }
+        if (peek() == plusSign) {
+            ++m_position;
+            return unary();
+        }
+        return power();
+    }
+
+    double power() {
+        const double base = postfix();
+        if (!m_ok || peek() != powerSign)
+            return base;
+        ++m_position;
+        const double exponent = unary();
+        if (!m_ok)
+            return 0;
+        // A negative base with a fractional exponent has no real result.
+        if (base < 0.0 && std::floor(exponent) != exponent)
+            return fail();
+        return checked(std::pow(base, exponent));
+    }
+
+    double postfix() {
+        double value = primary();
+        while (m_ok && peek() == factorialSign) {
+            ++m_position;
+            if (value < 0 || std::floor(value) != value || value > 170)
+                return fail();
+            double product = 1;
+            for (int n = 2; n <= int(value); ++n)
+                product *= n;
+            value = product;
+        }
+        return value;
+    }
+
+    double primary() {
+        if (m_position >= m_tokens.size())
+            return fail();
+        const QString token = m_tokens.at(m_position++);
+
+        if (token == piSign)
+            return M_PI;
+        if (token == eulerSign)
+            return M_E;
+        if (isOpener(token)) {
+            const double inner = expression();
+            if (!m_ok || peek() != closeParen)
+                return fail();
+            ++m_position;
+            return applyFunction(token, inner);
+        }
+        if (isOperator(token) || token == closeParen || token == factorialSign)
+            return fail();
+
+        bool numberOk = false;
+        const double value = QLocale::c().toDouble(token, &numberOk);
+        return numberOk ? value : fail();
+    }
+
+    double applyFunction(const QString &function, double x) {
+        if (function == openParen)
+            return x;
+        if (function == QStringLiteral("√("))
+            return x < 0 ? fail() : std::sqrt(x);
+        if (function == QStringLiteral("ln("))
+            return x <= 0 ? fail() : std::log(x);
+        if (function == QStringLiteral("log("))
+            return x <= 0 ? fail() : std::log10(x);
+        return trig(function, x);
+    }
+
+    double trig(const QString &function, double x) {
+        const bool sine = function == QStringLiteral("sin(");
+        const bool cosine = function == QStringLiteral("cos(");
+        if (m_degrees) {
+            // Whole quarter turns are exact, so sin(180) is 0 and tan(90)
+            // has no value rather than a huge rounding artifact.
+            const double reduced = std::fmod(x, 360.0);
+            if (std::fmod(reduced, 90.0) == 0) {
+                const int quarter = ((int(reduced / 90.0) % 4) + 4) % 4;
+                static const int sines[] = {0, 1, 0, -1};
+                static const int cosines[] = {1, 0, -1, 0};
+                if (sine)
+                    return sines[quarter];
+                if (cosine)
+                    return cosines[quarter];
+                return cosines[quarter] == 0 ? fail() : double(sines[quarter]) / cosines[quarter];
+            }
+            const double radians = reduced * M_PI / 180.0;
+            return checked(sine ? std::sin(radians)
+                                : cosine ? std::cos(radians) : std::tan(radians));
+        }
+        const double result = sine ? std::sin(x) : cosine ? std::cos(x) : std::tan(x);
+        return checked(snapTrigNoise(x, result));
+    }
+
+    const QStringList &m_tokens;
+    const bool m_degrees;
+    int m_position = 0;
+    bool m_ok = true;
+};
 }
 
 Backend::Backend(QObject *parent) : QObject(parent) {
@@ -64,6 +290,12 @@ Backend::Backend(QObject *parent) : QObject(parent) {
     // was the tiled or maximized rectangle, and the maximized flag was set for
     // a normal window, so the next launch filled the screen. Drop both keys.
     discardSavedWindowGeometry();
+
+    QSettings settings;
+    m_degrees = settings.value(QStringLiteral("mode/degrees"), true).toBool();
+    m_scientific = settings.value(QStringLiteral("mode/scientific"), false).toBool();
+    m_history = settings.value(QStringLiteral("history/entries")).toList();
+
     loadOmarchyTheme();
     watchOmarchyTheme();
     connect(&m_themeWatcher, &QFileSystemWatcher::fileChanged, this, [this]() {
@@ -89,18 +321,71 @@ QString Backend::display() const {
         return m_entry;
     if (m_justEvaluated)
         return m_result;
-    return formatNumber(QLocale::c().toDouble(currentValue()));
+
+    // Show the last complete operand: the number before a pending operator,
+    // or the value of a group that was just closed.
+    int end = m_tokens.size() - 1;
+    while (end >= 0 && !endsOperand(m_tokens.at(end)))
+        --end;
+    if (end < 0)
+        return QStringLiteral("0");
+    bool ok = false;
+    const double value = evaluateTokens(
+        m_tokens.mid(operandStart(m_tokens, end), end - operandStart(m_tokens, end) + 1),
+        &ok, m_degrees);
+    return ok ? formatNumber(value) : QStringLiteral("0");
+}
+
+// The answer so far, shown before equals is pressed. Empty when it would only
+// repeat the display or there is nothing yet to work out.
+QString Backend::preview() const {
+    if (m_errored || m_justEvaluated)
+        return QString();
+    const QStringList tokens = completedTokens();
+    if (tokens.size() < 2)
+        return QString();
+    bool ok = false;
+    const double value = evaluateTokens(tokens, &ok, m_degrees);
+    if (!ok)
+        return QString();
+    const QString formatted = formatNumber(value);
+    return formatted == display() ? QString() : formatted;
+}
+
+// What equals would evaluate: the entry sealed on, dangling operators and
+// empty groups dropped, and every open group closed.
+QStringList Backend::completedTokens() const {
+    QStringList tokens = m_tokens;
+    if (!m_entry.isEmpty())
+        tokens << sealNumber(m_entry);
+    while (!tokens.isEmpty() && (isOperator(tokens.last()) || isOpener(tokens.last())))
+        tokens.removeLast();
+    for (int open = unclosedGroups(tokens); open > 0; --open)
+        tokens << closeParen;
+    return tokens;
 }
 
 // Operand tokens carry full round-trip precision when they come from a chained
-// result; present every number at display precision instead.
+// result; present every number at display precision instead. Groups hug their
+// contents, so "sin( 30 )" reads "sin(30)".
 QString Backend::prettyExpression(const QStringList &tokens) {
-    QStringList pretty;
-    pretty.reserve(tokens.size());
-    for (const QString &token : tokens)
-        pretty << (isOperator(token) ? token
-                                     : formatNumber(QLocale::c().toDouble(token)));
-    return pretty.join(QLatin1Char(' '));
+    QString pretty;
+    for (int i = 0; i < tokens.size(); ++i) {
+        const QString &token = tokens.at(i);
+        const bool afterOpener = i > 0 && isOpener(tokens.at(i - 1));
+        const bool unaryMinus = token == minusSign && afterOpener;
+        const bool afterUnary = i > 1 && tokens.at(i - 1) == minusSign
+            && isOpener(tokens.at(i - 2));
+        if (i > 0 && !afterOpener && !afterUnary
+                && token != closeParen && token != factorialSign)
+            pretty += QLatin1Char(' ');
+        if (isOperator(token) || isOpener(token) || isConstant(token)
+                || token == closeParen || token == factorialSign || unaryMinus)
+            pretty += token;
+        else
+            pretty += formatNumber(QLocale::c().toDouble(token));
+    }
+    return pretty;
 }
 
 // The number the calculator is "at" right now: the entry being typed, or the
@@ -140,11 +425,39 @@ void Backend::pressKey(const QString &key) {
         pressBackspace();
     } else if (key == QStringLiteral("clear")) {
         pressClear();
+    } else if (key == openParen) {
+        pressOpener(openParen);
+    } else if (key == closeParen) {
+        pressCloser();
+    } else if (key == factorialSign) {
+        pressFactorial();
+    } else if (key == piSign || key == QStringLiteral("pi")) {
+        pressConstant(piSign);
+    } else if (key == eulerSign) {
+        pressConstant(eulerSign);
+    } else if (key == QStringLiteral("sqrt") || key == QStringLiteral("√")) {
+        pressOpener(QStringLiteral("√("));
+    } else if (functionTokens.contains(key + openParen)) {
+        pressOpener(key + openParen);
     } else {
         return;
     }
 
     emit calculationChanged();
+}
+
+// A new entry right after a complete operand multiplies it, so 2(3) is 6 and
+// (1 + 1) 5 is 10.
+void Backend::startEntry() {
+    if (m_entry.isEmpty() && !m_tokens.isEmpty() && endsOperand(m_tokens.last()))
+        m_tokens << multiplySign;
+}
+
+void Backend::sealEntry() {
+    if (m_entry.isEmpty())
+        return;
+    m_tokens << sealNumber(m_entry);
+    m_entry.clear();
 }
 
 void Backend::pressDigit(const QString &digit) {
@@ -155,6 +468,7 @@ void Backend::pressDigit(const QString &digit) {
         // appending to the result.
         pressClear();
     }
+    startEntry();
 
     if (m_entry == QStringLiteral("0")) {
         m_entry = digit;
@@ -185,6 +499,7 @@ void Backend::pressDecimal() {
         pressClear();
     if (m_justEvaluated)
         pressClear();
+    startEntry();
 
     if (m_entry.isEmpty())
         m_entry = QStringLiteral("0.");
@@ -209,34 +524,77 @@ void Backend::pressOperator(const QString &pretty) {
         m_entry.clear();
     } else if (m_tokens.isEmpty()) {
         m_tokens << QStringLiteral("0") << pretty;
+    } else if (isOpener(m_tokens.last())) {
+        // Straight after an opening parenthesis only a negation makes sense.
+        if (pretty == minusSign)
+            m_tokens << pretty;
     } else if (isOperator(m_tokens.last())) {
+        const bool unary = m_tokens.size() > 1 && isOpener(m_tokens.at(m_tokens.size() - 2));
+        if (unary && pretty != minusSign)
+            return;
         m_tokens.last() = pretty;
     } else {
         m_tokens << pretty;
     }
 }
 
+void Backend::pressOpener(const QString &opener) {
+    if (m_errored || m_justEvaluated)
+        pressClear();
+    sealEntry();
+    startEntry();
+    m_tokens << opener;
+}
+
+void Backend::pressCloser() {
+    if (m_errored || m_justEvaluated || unclosedGroups(m_tokens) == 0)
+        return;
+    sealEntry();
+    if (m_tokens.isEmpty() || !endsOperand(m_tokens.last()))
+        return;
+    m_tokens << closeParen;
+}
+
+void Backend::pressFactorial() {
+    if (m_errored)
+        return;
+    if (m_justEvaluated) {
+        m_tokens = QStringList(QString::number(m_resultValue, 'g', 17));
+        clearEvaluation();
+    }
+    sealEntry();
+    if (m_tokens.isEmpty() || !endsOperand(m_tokens.last()))
+        return;
+    m_tokens << factorialSign;
+}
+
+void Backend::pressConstant(const QString &constant) {
+    if (m_errored || m_justEvaluated)
+        pressClear();
+    sealEntry();
+    startEntry();
+    m_tokens << constant;
+}
+
 void Backend::pressEquals() {
     if (m_errored || m_justEvaluated)
         return;
 
-    QStringList finalTokens = m_tokens;
-    if (!m_entry.isEmpty())
-        finalTokens << sealNumber(m_entry);
-    while (!finalTokens.isEmpty() && isOperator(finalTokens.last()))
-        finalTokens.removeLast();
+    const QStringList finalTokens = completedTokens();
     if (finalTokens.isEmpty())
         return;
 
     m_evaluatedExpression = prettyExpression(finalTokens);
     bool ok = false;
-    const double value = evaluateTokens(finalTokens, &ok);
+    const double value = evaluateTokens(finalTokens, &ok, m_degrees);
     if (!ok) {
         m_errored = true;
     } else {
         m_resultValue = value;
         m_result = formatNumber(value);
         m_justEvaluated = true;
+        if (finalTokens.size() > 1)
+            addToHistory(m_evaluatedExpression, value);
     }
     m_tokens.clear();
     m_entry.clear();
@@ -244,7 +602,8 @@ void Backend::pressEquals() {
 
 // iOS-style percent: with a pending + or −, x% means x percent of the running
 // total, so 200 + 10 % = gives 220. With ×, ÷, or ^ (or on its own) x% is
-// simply x ÷ 100, so 200 × 10 % = gives 20.
+// simply x ÷ 100, so 200 × 10 % = gives 20. Inside parentheses the running
+// total is the group's, so (200 + 10 %) is 220 too.
 void Backend::pressPercent() {
     if (m_errored)
         return;
@@ -256,6 +615,9 @@ void Backend::pressPercent() {
         return;
     }
 
+    if (m_entry.isEmpty() && !m_tokens.isEmpty() && !isOperator(m_tokens.last()))
+        return;
+
     bool ok = false;
     const double value = QLocale::c().toDouble(currentValue(), &ok);
     if (!ok)
@@ -263,10 +625,19 @@ void Backend::pressPercent() {
 
     double percent = value / 100.0;
     if (!m_tokens.isEmpty() && (m_tokens.last() == plusSign || m_tokens.last() == minusSign)) {
-        QStringList leftSide = m_tokens;
-        leftSide.removeLast();
+        int groupStart = 0;
+        int depth = 0;
+        for (int i = m_tokens.size() - 1; i >= 0; --i) {
+            if (m_tokens.at(i) == closeParen) {
+                ++depth;
+            } else if (isOpener(m_tokens.at(i)) && depth-- == 0) {
+                groupStart = i + 1;
+                break;
+            }
+        }
+        const QStringList leftSide = m_tokens.mid(groupStart, m_tokens.size() - 1 - groupStart);
         bool baseOk = false;
-        const double base = evaluateTokens(leftSide, &baseOk);
+        const double base = evaluateTokens(leftSide, &baseOk, m_degrees);
         if (baseOk)
             percent = base * value / 100.0;
     }
@@ -282,6 +653,7 @@ void Backend::pressToggleSign() {
     // With nothing typed yet, start a fresh negative operand instead of
     // dredging up the previous one: 4 + ± 2 enters -2, not -42.
     if (m_entry.isEmpty()) {
+        startEntry();
         m_entry = QStringLiteral("-0");
         return;
     }
@@ -300,9 +672,23 @@ void Backend::pressBackspace() {
     if (m_justEvaluated)
         beginEditingAfterResult();
 
-    m_entry.chop(1);
-    if (m_entry == QStringLiteral("-"))
-        m_entry.clear();
+    if (!m_entry.isEmpty()) {
+        m_entry.chop(1);
+        if (m_entry == QStringLiteral("-"))
+            m_entry.clear();
+        return;
+    }
+
+    // With no entry, step back through the expression one token at a time,
+    // and reopen a number for editing when backspace reaches it.
+    if (m_tokens.isEmpty())
+        return;
+    m_tokens.removeLast();
+    if (!m_tokens.isEmpty() && endsOperand(m_tokens.last())
+            && m_tokens.last() != closeParen && m_tokens.last() != factorialSign
+            && !isConstant(m_tokens.last())) {
+        m_entry = formatNumber(QLocale::c().toDouble(m_tokens.takeLast()));
+    }
 }
 
 void Backend::pressClear() {
@@ -328,82 +714,11 @@ void Backend::clearEvaluation() {
     m_justEvaluated = false;
 }
 
-double Backend::evaluateTokens(const QStringList &tokens, bool *ok) {
+double Backend::evaluateTokens(const QStringList &tokens, bool *ok, bool degrees) {
     bool localOk = false;
     if (!ok)
         ok = &localOk;
-
-    *ok = false;
-    if (tokens.size() % 2 == 0)
-        return 0;
-
-    QList<double> values;
-    QStringList operators;
-
-    bool numberOk = false;
-    values << QLocale::c().toDouble(tokens.first(), &numberOk);
-    if (!numberOk)
-        return 0;
-
-    for (int i = 1; i + 1 < tokens.size(); i += 2) {
-        const QString &op = tokens.at(i);
-        const double operand = QLocale::c().toDouble(tokens.at(i + 1), &numberOk);
-        if (!numberOk || !isOperator(op))
-            return 0;
-        operators << op;
-        values << operand;
-    }
-
-    // Fold ^ right-to-left so 2 ^ 3 ^ 2 is 2^(3^2), not (2^3)^2. Then fold ×
-    // and ÷ left-to-right, then + and −.
-    for (int i = operators.size() - 1; i >= 0; --i) {
-        if (operators.at(i) != powerSign)
-            continue;
-
-        const double base = values.at(i);
-        const double exponent = values.at(i + 1);
-        // A negative base with a fractional exponent has no real result.
-        if (base < 0.0 && std::floor(exponent) != exponent)
-            return 0;
-
-        const double powered = std::pow(base, exponent);
-        if (!std::isfinite(powered))
-            return 0;
-
-        values[i] = powered;
-        values.removeAt(i + 1);
-        operators.removeAt(i);
-    }
-
-    QList<double> additiveValues;
-    QStringList additiveOperators;
-    additiveValues << values.first();
-    for (int i = 0; i < operators.size(); ++i) {
-        const QString &op = operators.at(i);
-        const double operand = values.at(i + 1);
-        if (op == multiplySign) {
-            additiveValues.last() *= operand;
-        } else if (op == divideSign) {
-            additiveValues.last() /= operand;
-        } else {
-            additiveOperators << op;
-            additiveValues << operand;
-        }
-    }
-
-    double total = additiveValues.first();
-    for (int i = 0; i < additiveOperators.size(); ++i) {
-        if (additiveOperators.at(i) == plusSign)
-            total += additiveValues.at(i + 1);
-        else
-            total -= additiveValues.at(i + 1);
-    }
-
-    if (!std::isfinite(total))
-        return 0;
-
-    *ok = true;
-    return total;
+    return Parser(tokens, degrees).parse(ok);
 }
 
 QString Backend::formatNumber(double value) {
@@ -445,8 +760,68 @@ void Backend::pasteNumber() {
 
     if (m_errored || m_justEvaluated)
         pressClear();
+    startEntry();
     m_entry = formatNumber(value);
     emit calculationChanged();
+}
+
+// Recalling a past result drops its exact value into the expression, where it
+// works like any operand: after another operand it multiplies.
+void Backend::recallHistory(int index) {
+    if (index < 0 || index >= m_history.size())
+        return;
+    bool ok = false;
+    const double value = QLocale::c().toDouble(
+        m_history.at(index).toMap().value(QStringLiteral("value")).toString(), &ok);
+    if (!ok || !std::isfinite(value))
+        return;
+
+    if (m_errored || m_justEvaluated)
+        pressClear();
+    sealEntry();
+    startEntry();
+    m_tokens << QString::number(value, 'g', 17);
+    emit calculationChanged();
+}
+
+void Backend::clearHistory() {
+    if (m_history.isEmpty())
+        return;
+    m_history.clear();
+    QSettings().remove(QStringLiteral("history/entries"));
+    emit historyChanged();
+}
+
+void Backend::addToHistory(const QString &expression, double value) {
+    QVariantMap entry;
+    entry.insert(QStringLiteral("expression"), expression);
+    entry.insert(QStringLiteral("result"), formatNumber(value));
+    entry.insert(QStringLiteral("value"), QString::number(value, 'g', 17));
+    if (!m_history.isEmpty() && m_history.first().toMap() == entry)
+        return;
+
+    m_history.prepend(entry);
+    while (m_history.size() > 100)
+        m_history.removeLast();
+    QSettings().setValue(QStringLiteral("history/entries"), m_history);
+    emit historyChanged();
+}
+
+void Backend::setDegrees(bool degrees) {
+    if (m_degrees == degrees)
+        return;
+    m_degrees = degrees;
+    QSettings().setValue(QStringLiteral("mode/degrees"), degrees);
+    emit degreesChanged();
+    emit calculationChanged();
+}
+
+void Backend::setScientific(bool scientific) {
+    if (m_scientific == scientific)
+        return;
+    m_scientific = scientific;
+    QSettings().setValue(QStringLiteral("mode/scientific"), scientific);
+    emit scientificChanged();
 }
 
 QVariantMap Backend::defaultWindowSize() const {
@@ -454,11 +829,13 @@ QVariantMap Backend::defaultWindowSize() const {
     if (!std::isfinite(scale) || scale <= 0)
         scale = 1.0;
 
-    // 400×568 is the v0.2.2 design size. The minimum matches Main.qml, so a
-    // text scale below 1 still opens at a usable calculator.
+    // 400×568 is the v0.2.2 design size; the scientific panel adds three key
+    // rows. The minimum matches Main.qml, so a text scale below 1 still opens
+    // at a usable calculator.
     QVariantMap size;
     size.insert(QStringLiteral("width"), qMax(300, qRound(400 * scale)));
-    size.insert(QStringLiteral("height"), qMax(430, qRound(568 * scale)));
+    size.insert(QStringLiteral("height"),
+                qMax(430, qRound((m_scientific ? 772 : 568) * scale)));
     return size;
 }
 

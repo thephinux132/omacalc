@@ -1,13 +1,14 @@
 import QtQuick
 
 // One keypad button. Numbers sit almost flush with the page, the operator
-// column lifts a step lighter, and equals inverts to the ink color.
+// column lifts a step lighter, scientific keys sit between the two with a
+// smaller label, and equals inverts to the ink color.
 Rectangle {
     id: control
 
     property string label
     property string keyValue: label
-    property string kind: "number" // "number", "operator" or "equals"
+    property string kind: "number" // "number", "operator", "function" or "equals"
     property string iconName
     property color pageColor: "#101010"
     property color inkColor: "#eeeeee"
@@ -25,6 +26,15 @@ Rectangle {
         if (label === "−") return "Subtract";
         if (label === "+") return "Add";
         if (label === "=") return "Equals";
+        if (label === "(") return "Open parenthesis";
+        if (label === ")") return "Close parenthesis";
+        if (label === "xʸ") return "Power";
+        if (label === "√") return "Square root";
+        if (label === "x!") return "Factorial";
+        if (label === "ln") return "Natural logarithm";
+        if (label === "log") return "Logarithm base 10";
+        if (label === "π") return "Pi";
+        if (label === "e") return "Euler's number";
         return label;
     }
     Accessible.onPressAction: activated()
@@ -36,7 +46,8 @@ Rectangle {
             base.b + (tint.b - base.b) * amount, 1);
     }
 
-    readonly property real restingLift: kind === "operator" ? 0.16 : 0.05
+    readonly property real restingLift: kind === "operator" ? 0.16
+        : (kind === "function" ? 0.1 : 0.05)
     readonly property real activeLift: restingLift
         + (hitArea.pressed ? 0.09 : (hitArea.containsMouse ? 0.045 : 0))
 
@@ -53,7 +64,8 @@ Rectangle {
         text: control.label
         color: control.kind === "equals" ? control.pageColor : control.inkColor
         font.family: "iA Writer Mono S"
-        font.pixelSize: Math.round(Math.min(parent.height * 0.42, parent.width * 0.3))
+        font.pixelSize: Math.round(Math.min(parent.height * 0.42, parent.width * 0.3)
+                                   * (control.kind === "function" ? 0.72 : 1))
     }
 
     Canvas {
